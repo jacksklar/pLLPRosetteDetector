@@ -1,211 +1,99 @@
-Skip to content
- 
-Search or jump to…
-
-Pull requests
-Issues
-Marketplace
-Explore
- 
-@damiandn 
-2,897
-52,279 32,284 tensorflow/models
- Code  Issues 1,241  Pull requests 369  Projects 2  Wiki  Insights
-models/research/object_detection/dataset_tools/create_pascal_tf_record.py
-@pkulzc pkulzc Update create_pascal_tf_record.py and create_pet_tf_record.py
-f98f000 on Apr 13, 2018
-@pkulzc @tombstone @liangxiao05
-186 lines (156 sloc)  6.95 KB
-    
-# Copyright 2017 The TensorFlow Authors. All Rights Reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# ==============================================================================
-
-r"""Convert raw PASCAL dataset to TFRecord for object_detection.
-Example usage:
-    python object_detection/dataset_tools/create_pascal_tf_record.py \
-        --data_dir=/home/user/VOCdevkit \
-        --year=VOC2012 \
-        --output_path=/home/user/pascal.record
 """
-from __future__ import absolute_import
+Usage:
+  # From tensorflow/models/
+  # Create train data:
+  python generate_tfrecord.py --csv_input=data/train_labels.csv  --output_path=train.record
+  # Create test data:
+  python generate_tfrecord.py --csv_input=data/test_labels.csv  --output_path=test.record
+"""
 from __future__ import division
 from __future__ import print_function
+from __future__ import absolute_import
 
-import hashlib
-import io
-import logging
 import os
-
-from lxml import etree
-import PIL.Image
+import io
+import pandas as pd
 import tensorflow as tf
 
+from PIL import Image
 from object_detection.utils import dataset_util
-from object_detection.utils import label_map_util
-
+from collections import namedtuple, OrderedDict
 
 flags = tf.app.flags
-flags.DEFINE_string('data_dir', '', 'Root directory to raw PASCAL VOC dataset.')
-flags.DEFINE_string('set', 'train', 'Convert training set, validation set or '
-                    'merged set.')
-flags.DEFINE_string('annotations_dir', 'Annotations',
-                    '(Relative) path to annotations directory.')
-flags.DEFINE_string('year', 'VOC2007', 'Desired challenge year.')
+flags.DEFINE_string('csv_input', '', 'Path to the CSV input')
 flags.DEFINE_string('output_path', '', 'Path to output TFRecord')
-flags.DEFINE_string('label_map_path', 'data/pascal_label_map.pbtxt',
-                    'Path to label map proto')
-flags.DEFINE_boolean('ignore_difficult_instances', False, 'Whether to ignore '
-                     'difficult instances')
+flags.DEFINE_string('image_dir', '', 'Path to images')
 FLAGS = flags.FLAGS
 
-SETS = ['train', 'val', 'trainval', 'test']
-YEARS = ['VOC2007', 'VOC2012', 'merged']
+
+# TO-DO replace this with label map
+def class_text_to_int(row_label):
+    if row_label == 'nm':
+        return 1
+    else:
+        None
 
 
-def dict_to_tf_example(data,
-                       dataset_directory,
-                       label_map_dict,
-                       ignore_difficult_instances=False,
-                       image_subdirectory='JPEGImages'):
-  """Convert XML derived dict to tf.Example proto.
-  Notice that this function normalizes the bounding box coordinates provided
-  by the raw data.
-  Args:
-    data: dict holding PASCAL XML fields for a single image (obtained by
-      running dataset_util.recursive_parse_xml_to_dict)
-    dataset_directory: Path to root directory holding PASCAL dataset
-    label_map_dict: A map from string label names to integers ids.
-    ignore_difficult_instances: Whether to skip difficult instances in the
-      dataset  (default: False).
-    image_subdirectory: String specifying subdirectory within the
-      PASCAL dataset directory holding the actual image data.
-  Returns:
-    example: The converted tf.Example.
-  Raises:
-    ValueError: if the image pointed to by data['filename'] is not a valid JPEG
-  """
-  img_path = os.path.join(data['folder'], image_subdirectory, data['filename'])
-  full_path = os.path.join(dataset_directory, img_path)
-  with tf.gfile.GFile(full_path, 'rb') as fid:
-    encoded_jpg = fid.read()
-  encoded_jpg_io = io.BytesIO(encoded_jpg)
-  image = PIL.Image.open(encoded_jpg_io)
-  if image.format != 'JPEG':
-    raise ValueError('Image format not JPEG')
-  key = hashlib.sha256(encoded_jpg).hexdigest()
+def split(df, group):
+    data = namedtuple('data', ['filename', 'object'])
+    gb = df.groupby(group)
+    return [data(filename, gb.get_group(x)) for filename, x in zip(gb.groups.keys(), gb.groups)]
 
-  width = int(data['size']['width'])
-  height = int(data['size']['height'])
 
-  xmin = []
-  ymin = []
-  xmax = []
-  ymax = []
-  classes = []
-  classes_text = []
-  truncated = []
-  poses = []
-  difficult_obj = []
-  if 'object' in data:
-    for obj in data['object']:
-      difficult = bool(int(obj['difficult']))
-      if ignore_difficult_instances and difficult:
-        continue
+def create_tf_example(group, path):
+    with tf.gfile.GFile(os.path.join(path, '{}'.format(group.filename)), 'rb') as fid:
+        encoded_jpg = fid.read()
+    encoded_jpg_io = io.BytesIO(encoded_jpg)
+    image = Image.open(encoded_jpg_io)
+    width, height = image.size
 
-      difficult_obj.append(int(difficult))
+    filename = group.filename.encode('utf8')
+    image_format = b'jpg'
+    xmins = []
+    xmaxs = []
+    ymins = []
+    ymaxs = []
+    classes_text = []
+    classes = []
 
-      xmin.append(float(obj['bndbox']['xmin']) / width)
-      ymin.append(float(obj['bndbox']['ymin']) / height)
-      xmax.append(float(obj['bndbox']['xmax']) / width)
-      ymax.append(float(obj['bndbox']['ymax']) / height)
-      classes_text.append(obj['name'].encode('utf8'))
-      classes.append(label_map_dict[obj['name']])
-      truncated.append(int(obj['truncated']))
-      poses.append(obj['pose'].encode('utf8'))
+    for index, row in group.object.iterrows():
+        xmins.append(row['xmin'] / width)
+        xmaxs.append(row['xmax'] / width)
+        ymins.append(row['ymin'] / height)
+        ymaxs.append(row['ymax'] / height)
+        classes_text.append(row['class'].encode('utf8'))
+        classes.append(class_text_to_int(row['class']))
 
-  example = tf.train.Example(features=tf.train.Features(feature={
-      'image/height': dataset_util.int64_feature(height),
-      'image/width': dataset_util.int64_feature(width),
-      'image/filename': dataset_util.bytes_feature(
-          data['filename'].encode('utf8')),
-      'image/source_id': dataset_util.bytes_feature(
-          data['filename'].encode('utf8')),
-      'image/key/sha256': dataset_util.bytes_feature(key.encode('utf8')),
-      'image/encoded': dataset_util.bytes_feature(encoded_jpg),
-      'image/format': dataset_util.bytes_feature('jpeg'.encode('utf8')),
-      'image/object/bbox/xmin': dataset_util.float_list_feature(xmin),
-      'image/object/bbox/xmax': dataset_util.float_list_feature(xmax),
-      'image/object/bbox/ymin': dataset_util.float_list_feature(ymin),
-      'image/object/bbox/ymax': dataset_util.float_list_feature(ymax),
-      'image/object/class/text': dataset_util.bytes_list_feature(classes_text),
-      'image/object/class/label': dataset_util.int64_list_feature(classes),
-      'image/object/difficult': dataset_util.int64_list_feature(difficult_obj),
-      'image/object/truncated': dataset_util.int64_list_feature(truncated),
-      'image/object/view': dataset_util.bytes_list_feature(poses),
-  }))
-  return example
+    tf_example = tf.train.Example(features=tf.train.Features(feature={
+        'image/height': dataset_util.int64_feature(height),
+        'image/width': dataset_util.int64_feature(width),
+        'image/filename': dataset_util.bytes_feature(filename),
+        'image/source_id': dataset_util.bytes_feature(filename),
+        'image/encoded': dataset_util.bytes_feature(encoded_jpg),
+        'image/format': dataset_util.bytes_feature(image_format),
+        'image/object/bbox/xmin': dataset_util.float_list_feature(xmins),
+        'image/object/bbox/xmax': dataset_util.float_list_feature(xmaxs),
+        'image/object/bbox/ymin': dataset_util.float_list_feature(ymins),
+        'image/object/bbox/ymax': dataset_util.float_list_feature(ymaxs),
+        'image/object/class/text': dataset_util.bytes_list_feature(classes_text),
+        'image/object/class/label': dataset_util.int64_list_feature(classes),
+    }))
+    return tf_example
 
 
 def main(_):
-  if FLAGS.set not in SETS:
-    raise ValueError('set must be in : {}'.format(SETS))
-  if FLAGS.year not in YEARS:
-    raise ValueError('year must be in : {}'.format(YEARS))
+    writer = tf.python_io.TFRecordWriter(FLAGS.output_path)
+    path = os.path.join(FLAGS.image_dir)
+    examples = pd.read_csv(FLAGS.csv_input)
+    grouped = split(examples, 'filename')
+    for group in grouped:
+        tf_example = create_tf_example(group, path)
+        writer.write(tf_example.SerializeToString())
 
-  data_dir = FLAGS.data_dir
-  years = ['VOC2007', 'VOC2012']
-  if FLAGS.year != 'merged':
-    years = [FLAGS.year]
-
-  writer = tf.python_io.TFRecordWriter(FLAGS.output_path)
-
-  label_map_dict = label_map_util.get_label_map_dict(FLAGS.label_map_path)
-
-  for year in years:
-    logging.info('Reading from PASCAL %s dataset.', year)
-    examples_path = os.path.join(data_dir, year, 'ImageSets', 'Main',
-                                 'aeroplane_' + FLAGS.set + '.txt')
-    annotations_dir = os.path.join(data_dir, year, FLAGS.annotations_dir)
-    examples_list = dataset_util.read_examples_list(examples_path)
-    for idx, example in enumerate(examples_list):
-      if idx % 100 == 0:
-        logging.info('On image %d of %d', idx, len(examples_list))
-      path = os.path.join(annotations_dir, example + '.xml')
-      with tf.gfile.GFile(path, 'r') as fid:
-        xml_str = fid.read()
-      xml = etree.fromstring(xml_str)
-      data = dataset_util.recursive_parse_xml_to_dict(xml)['annotation']
-
-      tf_example = dict_to_tf_example(data, FLAGS.data_dir, label_map_dict,
-                                      FLAGS.ignore_difficult_instances)
-      writer.write(tf_example.SerializeToString())
-
-  writer.close()
+    writer.close()
+    output_path = os.path.join(os.getcwd(), FLAGS.output_path)
+    print('Successfully created the TFRecords: {}'.format(output_path))
 
 
 if __name__ == '__main__':
-  tf.app.run()
-© 2019 GitHub, Inc.
-Terms
-Privacy
-Security
-Status
-Help
-Contact GitHub
-Pricing
-API
-Training
-Blog
-About
+    tf.app.run()
